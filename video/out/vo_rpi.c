@@ -40,7 +40,7 @@
 #include "sub/osd.h"
 
 #include "opengl/osd.h"
-#include "opengl/rpi.h"
+#include "opengl/context_rpi.h"
 
 struct priv {
     DISPMANX_DISPLAY_HANDLE_T display;
@@ -80,6 +80,7 @@ struct priv {
     int display_nr;
     int layer;
     int background;
+    int enable_osd;
 };
 
 // Magic alignments (in pixels) expected by the MMAL internals.
@@ -116,6 +117,8 @@ static size_t layout_buffer(struct mp_image *mpi, MMAL_BUFFER_HEADER_T *buffer,
 static void update_osd(struct vo *vo)
 {
     struct priv *p = vo->priv;
+    if (!p->enable_osd)
+        return;
 
     mpgl_osd_generate(p->osd, p->osd_res, p->osd_pts, 0, 0);
 
@@ -125,6 +128,8 @@ static void update_osd(struct vo *vo)
         return;
     }
     p->osd_change_counter = osd_change_counter;
+
+    MP_STATS(vo, "start rpi_osd");
 
     p->egl.gl->ClearColor(0, 0, 0, 0);
     p->egl.gl->Clear(GL_COLOR_BUFFER_BIT);
@@ -153,6 +158,8 @@ static void update_osd(struct vo *vo)
         gl_sc_gen_shader_and_reset(p->sc);
         mpgl_osd_draw_part(p->osd, p->w, -p->h, n);
     }
+
+    MP_STATS(vo, "stop rpi_osd");
 }
 
 static void resize(struct vo *vo)
@@ -164,18 +171,35 @@ static void resize(struct vo *vo)
 
     vo_get_src_dst_rects(vo, &src, &dst, &p->osd_res);
 
+    int rotate[] = {MMAL_DISPLAY_ROT0,
+                    MMAL_DISPLAY_ROT90,
+                    MMAL_DISPLAY_ROT180,
+                    MMAL_DISPLAY_ROT270};
+
+
+    int src_w = src.x1 - src.x0, src_h = src.y1 - src.y0,
+        dst_w = dst.x1 - dst.x0, dst_h = dst.y1 - dst.y0;
+    int p_x, p_y;
+    av_reduce(&p_x, &p_y, dst_w * src_h, src_w * dst_h, 16000);
     MMAL_DISPLAYREGION_T dr = {
         .hdr = { .id = MMAL_PARAMETER_DISPLAYREGION,
                  .size = sizeof(MMAL_DISPLAYREGION_T), },
-        .src_rect = { .x = src.x0, .y = src.y0,
-                      .width = src.x1 - src.x0, .height = src.y1 - src.y0, },
-        .dest_rect = { .x = dst.x0, .y = dst.y0,
-                       .width = dst.x1 - dst.x0, .height = dst.y1 - dst.y0, },
+        .src_rect = { .x = src.x0, .y = src.y0, .width = src_w, .height = src_h },
+        .dest_rect = { .x = dst.x0, .y = dst.y0, .width = dst_w, .height = dst_h },
         .layer = p->video_layer,
         .display_num = p->display_nr,
+        .pixel_x = p_x,
+        .pixel_y = p_y,
+        .transform = rotate[vo->params ? vo->params->rotate / 90 : 0],
         .set = MMAL_DISPLAY_SET_SRC_RECT | MMAL_DISPLAY_SET_DEST_RECT |
-               MMAL_DISPLAY_SET_LAYER | MMAL_DISPLAY_SET_NUM,
+               MMAL_DISPLAY_SET_LAYER | MMAL_DISPLAY_SET_NUM |
+               MMAL_DISPLAY_SET_PIXEL | MMAL_DISPLAY_SET_TRANSFORM,
     };
+
+    if (vo->params && (vo->params->rotate % 180) == 90) {
+        MPSWAP(int, dr.src_rect.x, dr.src_rect.y);
+        MPSWAP(int, dr.src_rect.width, dr.src_rect.height);
+    }
 
     if (mmal_port_parameter_set(input, &dr.hdr))
         MP_WARN(vo, "could not set video rectangle\n");
@@ -240,27 +264,29 @@ static int update_display_size(struct vo *vo)
         }
     }
 
-    alpha = (VC_DISPMANX_ALPHA_T){
-        .flags = DISPMANX_FLAGS_ALPHA_FROM_SOURCE,
-        .opacity = 0xFF,
-    };
-    p->osd_overlay = vc_dispmanx_element_add(p->update, p->display,
-                                             p->osd_layer,
-                                             &dst, 0, &src,
-                                             DISPMANX_PROTECTION_NONE,
-                                             &alpha, 0, 0);
-    if (!p->osd_overlay) {
-        MP_FATAL(vo, "Could not add DISPMANX element.\n");
-        return -1;
-    }
+    if (p->enable_osd) {
+        alpha = (VC_DISPMANX_ALPHA_T){
+            .flags = DISPMANX_FLAGS_ALPHA_FROM_SOURCE,
+            .opacity = 0xFF,
+        };
+        p->osd_overlay = vc_dispmanx_element_add(p->update, p->display,
+                                                 p->osd_layer,
+                                                 &dst, 0, &src,
+                                                 DISPMANX_PROTECTION_NONE,
+                                                 &alpha, 0, 0);
+        if (!p->osd_overlay) {
+            MP_FATAL(vo, "Could not add DISPMANX element.\n");
+            return -1;
+        }
 
-    if (mp_egl_rpi_init(&p->egl, p->osd_overlay, p->w, p->h) < 0) {
-        MP_FATAL(vo, "EGL/GLES initialization for OSD renderer failed.\n");
-        return -1;
+        if (mp_egl_rpi_init(&p->egl, p->osd_overlay, p->w, p->h) < 0) {
+            MP_FATAL(vo, "EGL/GLES initialization for OSD renderer failed.\n");
+            return -1;
+        }
+        p->sc = gl_sc_create(p->egl.gl, vo->log),
+        p->osd = mpgl_osd_init(p->egl.gl, vo->log, vo->osd);
+        p->osd_change_counter = -1; // force initial overlay rendering
     }
-    p->sc = gl_sc_create(p->egl.gl, vo->log),
-    p->osd = mpgl_osd_init(p->egl.gl, vo->log, vo->osd);
-    p->osd_change_counter = -1; // force initial overlay rendering
 
     p->display_fps = 0;
     TV_GET_STATE_RESP_T tvstate;
@@ -443,15 +469,11 @@ static int reconfig(struct vo *vo, struct mp_image_params *params)
 
     disable_renderer(vo);
 
-    AVRational dr = {params->d_w, params->d_h};
-    AVRational ir = {params->w, params->h};
-    AVRational par = av_div_q(dr, ir);
-
     input->format->encoding = opaque ? MMAL_ENCODING_OPAQUE : MMAL_ENCODING_I420;
     input->format->es->video.width = MP_ALIGN_UP(params->w, ALIGN_W);
     input->format->es->video.height = MP_ALIGN_UP(params->h, ALIGN_H);
     input->format->es->video.crop = (MMAL_RECT_T){0, 0, params->w, params->h};
-    input->format->es->video.par = (MMAL_RATIONAL_T){par.num, par.den};
+    input->format->es->video.par = (MMAL_RATIONAL_T){params->p_w, params->p_h};
     input->format->es->video.color_space = map_csp(params->colorspace);
 
     if (mmal_port_format_commit(input))
@@ -660,12 +682,14 @@ static const struct m_option options[] = {
     OPT_INT("display", display_nr, 0),
     OPT_INT("layer", layer, 0, OPTDEF_INT(-10)),
     OPT_FLAG("background", background, 0),
+    OPT_FLAG("osd", enable_osd, 0, OPTDEF_INT(1)),
     {0},
 };
 
 const struct vo_driver video_out_rpi = {
     .description = "Raspberry Pi (MMAL)",
     .name = "rpi",
+    .caps = VO_CAP_ROTATE90,
     .preinit = preinit,
     .query_format = query_format,
     .reconfig = reconfig,

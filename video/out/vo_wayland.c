@@ -132,8 +132,6 @@ struct priv {
     // this id tells us if the subtitle part has changed or not
     int change_id[MAX_OSD_PARTS];
 
-    int64_t recent_flip_time; // last frame event
-
     // options
     int enable_alpha;
     int use_rgb565;
@@ -301,8 +299,8 @@ static bool resize(struct priv *p)
         .imgfmt = p->video_format->mp_format,
         .w = p->dst_w,
         .h = p->dst_h,
-        .d_w = p->dst_w,
-        .d_h = p->dst_h,
+        .p_w = 1,
+        .p_h = 1,
     };
 
     mp_image_params_guess_csp(&p->sws->dst);
@@ -513,7 +511,6 @@ static void redraw(void *data, uint32_t time)
 
     p->x = 0;
     p->y = 0;
-    p->recent_flip_time = mp_time_us();
 }
 
 static void flip_page(struct vo *vo)
@@ -663,11 +660,6 @@ static int control(struct vo *vo, uint32_t request, void *data)
     }
     case VOCTRL_REDRAW_FRAME:
         return redraw_frame(p);
-    case VOCTRL_GET_RECENT_FLIP_TIME:
-    {
-        *(int64_t*) data = p->recent_flip_time;
-        return VO_TRUE;
-    }
     }
     int events = 0;
     int r = vo_wayland_control(vo, &events, request, data);

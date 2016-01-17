@@ -27,7 +27,7 @@
 #include <libavutil/intreadwrite.h>
 #include <libavutil/pixdesc.h>
 
-#include "talloc.h"
+#include "mpv_talloc.h"
 #include "config.h"
 #include "common/msg.h"
 #include "options/options.h"
@@ -352,6 +352,7 @@ static void init_avctx(struct dec_video *vd, const char *decoder,
     struct vd_lavc_params *lavc_param = vd->opts->vd_lavc_params;
     bool mp_rawvideo = false;
     struct sh_stream *sh = vd->header;
+    struct mp_codec_params *c = sh->codec;
 
     assert(!ctx->avctx);
 
@@ -414,23 +415,23 @@ static void init_avctx(struct dec_video *vd, const char *decoder,
     // Do this after the above avopt handling in case it changes values
     ctx->skip_frame = avctx->skip_frame;
 
-    avctx->codec_tag = sh->codec_tag;
-    avctx->coded_width  = sh->video->disp_w;
-    avctx->coded_height = sh->video->disp_h;
-    avctx->bits_per_coded_sample = sh->video->bits_per_coded_sample;
+    avctx->codec_tag = c->codec_tag;
+    avctx->coded_width  = c->disp_w;
+    avctx->coded_height = c->disp_h;
+    avctx->bits_per_coded_sample = c->bits_per_coded_sample;
 
-    mp_lavc_set_extradata(avctx, sh->extradata, sh->extradata_size);
+    mp_lavc_set_extradata(avctx, c->extradata, c->extradata_size);
 
     if (mp_rawvideo) {
-        avctx->pix_fmt = imgfmt2pixfmt(sh->codec_tag);
+        avctx->pix_fmt = imgfmt2pixfmt(c->codec_tag);
         avctx->codec_tag = 0;
-        if (avctx->pix_fmt == AV_PIX_FMT_NONE && sh->codec_tag)
+        if (avctx->pix_fmt == AV_PIX_FMT_NONE && c->codec_tag)
             MP_ERR(vd, "Image format %s not supported by lavc.\n",
-                   mp_imgfmt_to_name(sh->codec_tag));
+                   mp_imgfmt_to_name(c->codec_tag));
     }
 
-    if (sh->lav_headers)
-        mp_copy_lav_codec_headers(avctx, sh->lav_headers);
+    if (c->lav_headers)
+        mp_copy_lav_codec_headers(avctx, c->lav_headers);
 
     /* open it */
     if (avcodec_open2(avctx, lavc_codec, NULL) < 0)
@@ -441,6 +442,15 @@ static void init_avctx(struct dec_video *vd, const char *decoder,
 error:
     MP_ERR(vd, "Could not open codec.\n");
     uninit_avctx(vd);
+}
+
+static void reset_avctx(struct dec_video *vd)
+{
+    vd_ffmpeg_ctx *ctx = vd->priv;
+
+    if (ctx->avctx)
+        avcodec_flush_buffers(ctx->avctx);
+    ctx->flushing = false;
 }
 
 static void uninit_avctx(struct dec_video *vd)
@@ -463,6 +473,7 @@ static void uninit_avctx(struct dec_video *vd)
 
     av_frame_free(&ctx->pic);
 
+    ctx->flushing = false;
     ctx->hwdec_failed = false;
     ctx->hwdec_fail_count = 0;
 }
@@ -474,7 +485,6 @@ static void update_image_params(struct dec_video *vd, AVFrame *frame,
     struct MPOpts *opts = ctx->opts;
     int width = frame->width;
     int height = frame->height;
-    float aspect = av_q2d(frame->sample_aspect_ratio) * width / height;
     int pix_fmt = frame->format;
 
     if (pix_fmt != ctx->pix_fmt) {
@@ -489,20 +499,17 @@ static void update_image_params(struct dec_video *vd, AVFrame *frame,
         .imgfmt = ctx->best_csp,
         .w = width,
         .h = height,
-        .d_w = 0,
-        .d_h = 0,
+        .p_w = frame->sample_aspect_ratio.num,
+        .p_h = frame->sample_aspect_ratio.den,
         .colorspace = avcol_spc_to_mp_csp(ctx->avctx->colorspace),
         .colorlevels = avcol_range_to_mp_csp_levels(ctx->avctx->color_range),
         .primaries = avcol_pri_to_mp_csp_prim(ctx->avctx->color_primaries),
         .gamma = avcol_trc_to_mp_csp_trc(ctx->avctx->color_trc),
         .chroma_location =
             avchroma_location_to_mp(ctx->avctx->chroma_sample_location),
-        .rotate = vd->header->video->rotate,
-        .stereo_in = vd->header->video->stereo_mode,
+        .rotate = vd->header->codec->rotate,
+        .stereo_in = vd->header->codec->stereo_mode,
     };
-
-    if (aspect > 0)
-        vf_set_dar(&out_params->d_w, &out_params->d_h, width, height, aspect);
 
     if (opts->video_rotate < 0) {
         out_params->rotate = 0;
@@ -522,6 +529,12 @@ static enum AVPixelFormat get_format_hwdec(struct AVCodecContext *avctx,
     for (int i = 0; fmt[i] != AV_PIX_FMT_NONE; i++)
         MP_VERBOSE(vd, " %s", av_get_pix_fmt_name(fmt[i]));
     MP_VERBOSE(vd, "\n");
+
+#if HAVE_AVCODEC_PROFILE_NAME
+    const char *profile = avcodec_profile_name(avctx->codec_id, avctx->profile);
+    MP_VERBOSE(vd, "Codec profile: %s (0x%x)\n", profile ? profile : "unknown",
+               avctx->profile);
+#endif
 
     assert(ctx->hwdec);
 
@@ -614,8 +627,8 @@ static void decode(struct dec_video *vd, struct demux_packet *packet,
     struct vd_lavc_params *opts = ctx->opts->vd_lavc_params;
     AVPacket pkt;
 
-    if (ctx->hwdec_request_reinit)
-        avcodec_flush_buffers(avctx);
+    if (!avctx)
+        return;
 
     if (flags) {
         // hr-seek framedrop vs. normal framedrop
@@ -626,10 +639,20 @@ static void decode(struct dec_video *vd, struct demux_packet *packet,
     }
 
     mp_set_av_packet(&pkt, packet, NULL);
+    ctx->flushing |= !pkt.data;
+
+    // Reset decoder if hw state got reset, or new data comes during flushing.
+    if (ctx->hwdec_request_reinit || (pkt.data && ctx->flushing))
+        reset_avctx(vd);
 
     hwdec_lock(ctx);
     ret = avcodec_decode_video2(avctx, ctx->pic, &got_picture, &pkt);
     hwdec_unlock(ctx);
+
+    // Reset decoder if it was fully flushed. Caller might send more flush
+    // packets, or even new actual packets.
+    if (ctx->flushing && (ret < 0 || !got_picture))
+        reset_avctx(vd);
 
     if (ret < 0) {
         MP_WARN(vd, "Error while decoding frame!\n");
@@ -701,11 +724,23 @@ static struct mp_image *decode_with_fallback(struct dec_video *vd,
 static int control(struct dec_video *vd, int cmd, void *arg)
 {
     vd_ffmpeg_ctx *ctx = vd->priv;
-    AVCodecContext *avctx = ctx->avctx;
     switch (cmd) {
     case VDCTRL_RESET:
-        avcodec_flush_buffers(avctx);
+        reset_avctx(vd);
         return CONTROL_TRUE;
+    case VDCTRL_QUERY_UNSEEN_FRAMES: {
+        AVCodecContext *avctx = ctx->avctx;
+        if (!avctx)
+            break;
+        if (ctx->hwdec && ctx->hwdec->type == HWDEC_RPI)
+            break; // MMAL has arbitrary buffering, thus unknown
+        int delay = avctx->has_b_frames;
+        assert(delay >= 0);
+        if (avctx->active_thread_type & FF_THREAD_FRAME)
+            delay += avctx->thread_count - 1;
+        *(int *)arg = delay;
+        return CONTROL_TRUE;
+    }
     case VDCTRL_GET_HWDEC: {
         int hwdec = ctx->hwdec ? ctx->hwdec->type : 0;
         if (!ctx->software_fallback_decoder)

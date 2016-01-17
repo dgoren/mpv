@@ -329,9 +329,9 @@ List of Input Commands
     This is similar to ``sub-step``, except that it seeks video and audio
     instead of adjusting the subtitle delay.
 
-    Like with ``sub-step``, this works with external text subtitles only. For
-    embedded text subtitles (like with Matroska), this works only with subtitle
-    events that have already been displayed.
+    For embedded subtitles (like with Matroska), this works only with subtitle
+    events that have already been displayed, or are within a short prefetch
+    range.
 
 ``osd [<level>]``
     Toggle OSD level. If ``<level>`` is specified, set the OSD mode
@@ -418,7 +418,7 @@ List of Input Commands
 
     <reselect> (default)
         Select the default audio and subtitle streams, which typically selects
-        external files with highest preference. (The implementation is not
+        external files with the highest preference. (The implementation is not
         perfect, and could be improved on request.)
 
     <keep-selection>
@@ -546,6 +546,12 @@ Input Commands that are Possibly Subject to Change
         Always bind a key. (The input section that was made active most recently
         wins if there are ambiguities.)
 
+    This command can be used to dispatch arbitrary keys to a script or a client
+    API user. If the input section defines ``script-binding`` commands, it is
+    also possible to get separate events on key up/down, and relatively detailed
+    information about the key state. The special key name ``unmapped`` can be
+    used to match any unmapped key.
+
 ``overlay-add <id> <x> <y> "<file>" <offset> "<fmt>" <w> <h> <stride>``
     Add an OSD overlay sourced from raw data. This might be useful for scripts
     and applications controlling mpv, and which want to display things on top
@@ -647,14 +653,20 @@ Input Commands that are Possibly Subject to Change
     For completeness, here is how this command works internally. The details
     could change any time. On any matching key event, ``script_message_to``
     or ``script_message`` is called (depending on whether the script name is
-    included), where the first argument is the string ``key-binding``, the
-    second argument is the name of the binding, and the third argument is the
-    key state as string. The key state consists of a number of letters. The
-    first letter is one of ``d`` (key was pressed down), ``u`` (was released),
-    ``r`` (key is still down, and was repeated; only if key repeat is enabled
-    for this binding), ``p`` (key was pressed; happens if up/down can't be
-    tracked). The second letter whether the event originates from the mouse,
-    either ``m`` (mouse button) or ``-`` (something else).
+    included), with the following arguments:
+
+    1. The string ``key-binding``.
+    2. The name of the binding (as established above).
+    3. The key state as string (see below).
+    4. The key name (since mpv 0.15.0).
+
+    The key state consists of 2 letters:
+
+    1. One of ``d`` (key was pressed down), ``u`` (was released), ``r`` (key
+       is still down, and was repeated; only if key repeat is enabled for this
+       binding), ``p`` (key was pressed; happens if up/down can't be tracked).
+    2. Whether the event originates from the mouse, either ``m`` (mouse button)
+       or ``-`` (something else).
 
 ``ab-loop``
     Cycle through A-B loop states. The first command will set the ``A`` point
@@ -782,7 +794,7 @@ Input sections group a set of bindings, and enable or disable them at once.
 In ``input.conf``, each key binding is assigned to an input section, rather
 than actually having explicit text sections.
 
-Also see ``enable_section`` and ``disable_section`` commands.
+See also: ``enable_section`` and ``disable_section`` commands.
 
 Predefined bindings:
 
@@ -860,7 +872,11 @@ Property list
               quantities: fps and possibly rounded timestamps.)
 
 ``path``
-    Full path of the currently played file.
+    Full path of the currently played file. Usually this is exactly the same
+    string you pass on the mpv command line or the ``loadfile`` command, even
+    if it's a relative path. If you expect an absolute path, you will have to
+    determine it yourself, for example by using the ``working-directory``
+    property.
 
 ``media-title``
     If the currently played file has a ``title`` tag, use that.
@@ -921,6 +937,18 @@ Property list
     (which can happen especially with bad source timestamps). For example,
     using the ``display-desync`` mode should never change this value from 0.
 
+``vsync-ratio``
+    For how many vsyncs a frame is displayed on average. This is available if
+    display-sync is active only. For 30 FPS video on a 60 Hz screen, this will
+    be 2. This is the moving average of what actually has been scheduled, so
+    24 FPS on 60 Hz will never remain exactly on 2.5, but jitter depending on
+    the last frame displayed.
+
+``vo-delayed-frame-count``
+    Estimated number of frames delayed due to external circumstances in
+    display-sync mode. Note that in general, mpv has to guess that this is
+    happening, and the guess can be inaccurate.
+
 ``percent-pos`` (RW)
     Position in current file (0-100). The advantage over using this instead of
     calculating it out of other properties is that it properly falls back to
@@ -931,8 +959,9 @@ Property list
     Position in current file in seconds.
 
 ``time-start``
-    Return the start time of the file. (Usually 0, but some kind of files,
-    especially transport streams, can have a different start time.)
+    Deprecated. Always returns 0. Before mpv 0.14, this used to return the start
+    time of the file (could affect e.g. transport streams). See
+    ``--rebase-start-time`` option.
 
 ``time-remaining``
     Remaining length of the file in seconds. Note that the file duration is not
@@ -942,9 +971,10 @@ Property list
     ``time-remaining`` scaled by the current ``speed``.
 
 ``playback-time`` (RW)
-    The playback time, which is the time relative to playback start. (This can
-    be different from the ``time-pos`` property if the file does not start at
-    position ``0``, in which case ``time-pos`` is the source timestamp.)
+    Position in current file in seconds. Unlike ``time-pos``, the time is
+    clamped to the range of the file. (Inaccurate file durations etc. could
+    make it go out of range. Useful on attempts to seek outside of the file,
+    as the seek target time is considered the current position during seeking.)
 
 ``chapter`` (RW)
     Current chapter number. The number of the first chapter is 0.
@@ -1090,13 +1120,13 @@ Property list
 
 ``vf-metadata/<filter-label>``
     Metadata added by video filters. Accessed by the filter label,
-    which if not explicitly specified using the ``@filter-label:`` syntax,
+    which, if not explicitly specified using the ``@filter-label:`` syntax,
     will be ``<filter-name>NN``.
 
     Works similar to ``metadata`` property. It allows the same access
     methods (using sub-properties).
 
-    An example of these kind of metadata are the cropping parameters
+    An example of this kind of metadata are the cropping parameters
     added by ``--vf=lavfi=cropdetect``.
 
 ``af-metadata/<filter-label>``
@@ -1123,7 +1153,7 @@ Property list
 
 ``cache-size`` (RW)
     Network cache size in KB. This is similar to ``--cache``. This allows
-    to set the cache size at runtime. Currently, it's not possible to enable
+    setting the cache size at runtime. Currently, it's not possible to enable
     or disable the cache at runtime using this property, just to resize an
     existing cache.
 
@@ -1426,6 +1456,19 @@ Property list
 
     Has the same sub-properties as ``video-params``.
 
+``video-frame-info``
+    Approximate information of the current frame. Note that if any of these
+    are used on OSD, the information might be off by a few frames due to OSD
+    redrawing and frame display being somewhat disconnected, and you might
+    have to pause and force a redraw.
+
+    Sub-properties:
+
+    ``video-frame-info/picture-type``
+    ``video-frame-info/interlaced``
+    ``video-frame-info/tff``
+    ``video-frame-info/repeat``
+
 ``fps``
     Container FPS. This can easily contain bogus values. For videos that use
     modern container formats or video codecs, this will often be incorrect.
@@ -1452,12 +1495,20 @@ Property list
     Names of the displays that the mpv window covers. On X11, these
     are the xrandr names (LVDS1, HDMI1, DP1, VGA1, etc.).
 
-``display-fps``
+``display-fps`` (RW)
     The refresh rate of the current display. Currently, this is the lowest FPS
     of any display covered by the video, as retrieved by the underlying system
     APIs (e.g. xrandr on X11). It is not the measured FPS. It's not necessarily
     available on all platforms. Note that any of the listed facts may change
     any time without a warning.
+
+``estimated-display-fps``
+    Only available if display-sync mode (as selected by ``--video-sync``) is
+    active. Returns the actual rate at which display refreshes seem to occur,
+    measured by system time.
+
+``vsync-jitter``
+    Estimated deviation factor of the vsync duration.
 
 ``video-aspect`` (RW)
     Video aspect, see ``--video-aspect``.
@@ -1490,6 +1541,15 @@ Property list
 
 ``program`` (W)
     Switch TS program (write-only).
+
+``dvb-channel`` (W)
+    Pair of integers: card,channel of current DVB stream.
+    Can be switched to switch to another channel on the same card. 
+
+``dvb-channel-name`` (RW)
+    Name of current DVB program.
+    On write, a channel-switch to the named channel on the same
+    card is performed. Can also be used for channel switching. 
 
 ``sid`` (RW)
     Current subtitle track (similar to ``--sid``).

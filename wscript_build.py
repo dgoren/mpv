@@ -13,6 +13,16 @@ def _add_rst_manual_dependencies(ctx):
             ctx.path.find_node('DOCS/man/mpv.rst'),
             ctx.path.find_node(manpage_source))
 
+def _build_html(ctx):
+    ctx(
+        name         = 'rst2html',
+        target       = 'DOCS/man/mpv.html',
+        source       = 'DOCS/man/mpv.rst',
+        rule         = '${RST2HTML} ${SRC} ${TGT}',
+        install_path = ctx.env.DOCDIR)
+
+    _add_rst_manual_dependencies(ctx)
+
 def _build_man(ctx):
     ctx(
         name         = 'rst2man',
@@ -124,7 +134,6 @@ def build(ctx):
         ( "audio/out/ao_coreaudio_exclusive.c",  "coreaudio" ),
         ( "audio/out/ao_coreaudio_properties.c", "coreaudio" ),
         ( "audio/out/ao_coreaudio_utils.c",      "coreaudio" ),
-        ( "audio/out/ao_dsound.c",               "dsound" ),
         ( "audio/out/ao_jack.c",                 "jack" ),
         ( "audio/out/ao_lavc.c",                 "encoding" ),
         ( "audio/out/ao_null.c" ),
@@ -162,14 +171,12 @@ def build(ctx):
         ( "demux/demux_edl.c" ),
         ( "demux/demux_lavf.c" ),
         ( "demux/demux_libarchive.c",            "libarchive" ),
-        ( "demux/demux_libass.c",                "libass"),
         ( "demux/demux_mf.c" ),
         ( "demux/demux_mkv.c" ),
         ( "demux/demux_mkv_timeline.c" ),
         ( "demux/demux_playlist.c" ),
         ( "demux/demux_raw.c" ),
         ( "demux/demux_rar.c" ),
-        ( "demux/demux_subreader.c" ),
         ( "demux/demux_tv.c",                    "tv" ),
         ( "demux/ebml.c" ),
         ( "demux/packet.c" ),
@@ -182,7 +189,7 @@ def build(ctx):
         ( "input/input.c" ),
         ( "input/ipc.c",                         "!mingw" ),
         ( "input/keycodes.c" ),
-        ( "input/pipe-win32.c",                  "waio" ),
+        ( "input/pipe-win32.c",                  "mingw" ),
 
         ## Misc
         ( "misc/bstr.c" ),
@@ -244,7 +251,6 @@ def build(ctx):
         ( "stream/stream_memory.c" ),
         ( "stream/stream_mf.c" ),
         ( "stream/stream_null.c" ),
-        ( "stream/stream_pvr.c",                 "pvr" ),
         ( "stream/stream_rar.c" ),
         ( "stream/stream_smb.c",                 "libsmbclient" ),
         ( "stream/stream_tv.c",                  "tv" ),
@@ -257,16 +263,12 @@ def build(ctx):
         ( "sub/dec_sub.c" ),
         ( "sub/draw_bmp.c" ),
         ( "sub/img_convert.c" ),
+        ( "sub/lavc_conv.c" ),
         ( "sub/osd.c" ),
         ( "sub/osd_dummy.c",                     "dummy-osd" ),
         ( "sub/osd_libass.c",                    "libass-osd" ),
         ( "sub/sd_ass.c",                        "libass" ),
         ( "sub/sd_lavc.c" ),
-        ( "sub/sd_lavc_conv.c" ),
-        ( "sub/sd_lavf_srt.c" ),
-        ( "sub/sd_microdvd.c" ),
-        ( "sub/sd_movtext.c" ),
-        ( "sub/sd_srt.c" ),
 
         ## Video
         ( "video/csputils.c" ),
@@ -318,9 +320,18 @@ def build(ctx):
         ( "video/out/cocoa_common.m",            "cocoa" ),
         ( "video/out/dither.c" ),
         ( "video/out/filter_kernels.c" ),
-        ( "video/out/opengl/cocoa.c",            "gl-cocoa" ),
         ( "video/out/opengl/common.c",           "gl" ),
-        ( "video/out/opengl/rpi.c",              "rpi" ),
+        ( "video/out/opengl/context.c",          "gl" ),
+        ( "video/out/opengl/context_angle.c",    "egl-angle" ),
+        ( "video/out/opengl/context_cocoa.c",    "gl-cocoa" ),
+        ( "video/out/opengl/context_drm_egl.c",  "egl-drm" ),
+        ( "video/out/opengl/context_dxinterop.c","gl-dxinterop" ),
+        ( "video/out/opengl/context_rpi.c",      "rpi" ),
+        ( "video/out/opengl/context_wayland.c",  "gl-wayland" ),
+        ( "video/out/opengl/context_w32.c",      "gl-win32" ),
+        ( "video/out/opengl/context_x11.c",      "gl-x11" ),
+        ( "video/out/opengl/context_x11egl.c",   "egl-x11" ),
+        ( "video/out/opengl/egl_helpers.c",      "egl-helpers" ),
         ( "video/out/opengl/hwdec.c",            "gl" ),
         ( "video/out/opengl/hwdec_dxva2.c",      "gl-win32" ),
         ( "video/out/opengl/hwdec_vaegl.c",      "vaapi-egl" ),
@@ -334,10 +345,6 @@ def build(ctx):
         ( "video/out/opengl/utils.c",            "gl" ),
         ( "video/out/opengl/video.c",            "gl" ),
         ( "video/out/opengl/video_shaders.c",    "gl" ),
-        ( "video/out/opengl/w32.c",              "gl-win32" ),
-        ( "video/out/opengl/wayland.c",          "gl-wayland" ),
-        ( "video/out/opengl/x11.c",              "gl-x11" ),
-        ( "video/out/opengl/x11egl.c",           "egl-x11" ),
         ( "video/out/vo.c" ),
         ( "video/out/vo_caca.c",                 "caca" ),
         ( "video/out/vo_drm.c",                  "drm" ),
@@ -356,6 +363,7 @@ def build(ctx):
         ( "video/out/vo_xv.c",                   "xv" ),
         ( "video/out/w32_common.c",              "win32" ),
         ( "video/out/win32/displayconfig.c",     "win32" ),
+        ( "video/out/win32/exclusive_hack.c",    "gl-win32" ),
         ( "video/out/wayland_common.c",          "wayland" ),
         ( "video/out/wayland/buffer.c",          "wayland" ),
         ( "video/out/wayland/memfile.c",         "wayland" ),
@@ -384,6 +392,7 @@ def build(ctx):
         ( "osdep/glob-win.c",                    "glob-win32-replacement" ),
         ( "osdep/w32_keyboard.c",                "os-win32" ),
         ( "osdep/w32_keyboard.c",                "os-cygwin" ),
+        ( "osdep/windows_utils.c",               "win32" ),
         ( "osdep/mpv.rc",                        "win32-executable" ),
         ( "osdep/win32/pthread.c",               "win32-internal-pthreads"),
 
@@ -435,7 +444,7 @@ def build(ctx):
             features     = "c cprogram",
             install_path = ctx.env.BINDIR
         )
-        for f in ['example.conf', 'input.conf', 'mplayer-input.conf', \
+        for f in ['mpv.conf', 'input.conf', 'mplayer-input.conf', \
                   'restore-old-bindings.conf']:
             ctx.install_as(os.path.join(ctx.env.DOCDIR, f),
                            os.path.join('etc/', f))
@@ -531,6 +540,9 @@ def build(ctx):
                 features     = 'c cshlib',
                 install_path = ctx.env.LIBDIR + '/mpv' )
 
+    if ctx.dependency_satisfied('html-build'):
+        _build_html(ctx)
+
     if ctx.dependency_satisfied('manpage-build'):
         _build_man(ctx)
 
@@ -555,3 +567,7 @@ def build(ctx):
             ctx.install_as(
                 ctx.env.DATADIR + '/icons/hicolor/' + size + '/apps/mpv.png',
                 'etc/mpv-icon-8bit-' + size + '.png')
+
+        ctx.install_as(
+                ctx.env.DATADIR + '/icons/hicolor/scalable/apps/mpv.svg',
+                'etc/mpv-gradient.svg')

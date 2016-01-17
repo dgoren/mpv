@@ -33,16 +33,17 @@
 
 #include "config.h"
 
-#include "talloc.h"
+#include "mpv_talloc.h"
 #include "common/common.h"
 #include "misc/bstr.h"
 #include "common/msg.h"
+#include "common/global.h"
 #include "options/m_config.h"
 #include "vo.h"
 #include "video/mp_image.h"
 #include "sub/osd.h"
 
-#include "opengl/common.h"
+#include "opengl/context.h"
 #include "opengl/utils.h"
 #include "opengl/hwdec.h"
 #include "opengl/osd.h"
@@ -101,7 +102,8 @@ static void resize(struct gl_priv *p)
     struct mp_osd_res osd;
     vo_get_src_dst_rects(vo, &src, &dst, &osd);
 
-    gl_video_resize(p->renderer, vo->dwidth, -vo->dheight, &src, &dst, &osd);
+    int height = p->glctx->flip_v ? vo->dheight : -vo->dheight;
+    gl_video_resize(p->renderer, vo->dwidth, height, &src, &dst, &osd);
 
     vo->want_redraw = true;
 }
@@ -134,11 +136,6 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame)
     }
 
     gl_video_render_frame(p->renderer, frame, 0);
-
-    // The playloop calls this last before waiting some time until it decides
-    // to call flip_page(). Tell OpenGL to start execution of the GPU commands
-    // while we sleep (this happens asynchronously).
-    gl->Flush();
 
     if (p->use_glFinish)
         gl->Finish();
@@ -209,7 +206,7 @@ static void request_hwdec_api(struct gl_priv *p, const char *api_name)
     if (p->hwdec)
         return;
 
-    p->hwdec = gl_hwdec_load_api(p->vo->log, p->gl, api_name);
+    p->hwdec = gl_hwdec_load_api(p->vo->log, p->gl, p->vo->global, api_name);
     gl_video_set_hwdec(p->renderer, p->hwdec);
     if (p->hwdec)
         p->hwdec_info.hwctx = p->hwdec->hwctx;
@@ -332,6 +329,8 @@ static int control(struct vo *vo, uint32_t request, void *data)
         if (screen) {
             screen->params.primaries = p->renderer_opts->target_prim;
             screen->params.gamma = p->renderer_opts->target_trc;
+            if (p->glctx->flip_v)
+                mp_image_vflip(screen);
         }
         *(struct mp_image **)data = screen;
         return true;
@@ -401,8 +400,10 @@ static int preinit(struct vo *vo)
     if (p->use_gl_debug)
         vo_flags |= VOFLAG_GL_DEBUG;
 
-    if (p->es)
+    if (p->es == 1)
         vo_flags |= VOFLAG_GLES;
+    if (p->es == -1)
+        vo_flags |= VOFLAG_NO_GLES;
 
     if (p->allow_sw)
         vo_flags |= VOFLAG_SW;
@@ -424,8 +425,6 @@ static int preinit(struct vo *vo)
     if (!p->renderer)
         goto err_out;
     gl_video_set_osd_source(p->renderer, vo->osd);
-    gl_video_set_output_depth(p->renderer, p->glctx->depth_r, p->glctx->depth_g,
-                              p->glctx->depth_b);
     gl_video_set_options(p->renderer, p->renderer_opts);
     gl_video_configure_queue(p->renderer, vo);
 
@@ -439,9 +438,11 @@ static int preinit(struct vo *vo)
     p->hwdec_info.load_api = call_request_hwdec_api;
     p->hwdec_info.load_api_ctx = vo;
 
-    if (vo->opts->hwdec_preload_api != HWDEC_NONE) {
-        p->hwdec =
-            gl_hwdec_load_api_id(p->vo->log, p->gl, vo->opts->hwdec_preload_api);
+    int hwdec = vo->opts->hwdec_preload_api;
+    if (hwdec == HWDEC_NONE)
+        hwdec = vo->global->opts->hwdec_api;
+    if (hwdec != HWDEC_NONE) {
+        p->hwdec = gl_hwdec_load_api_id(p->vo->log, p->gl, vo->global, hwdec);
         gl_video_set_hwdec(p->renderer, p->hwdec);
         if (p->hwdec)
             p->hwdec_info.hwctx = p->hwdec->hwctx;
@@ -464,7 +465,7 @@ static const struct m_option options[] = {
     OPT_FLAG("debug", use_gl_debug, 0),
     OPT_STRING_VALIDATE("backend", backend, 0, mpgl_validate_backend_opt),
     OPT_FLAG("sw", allow_sw, 0),
-    OPT_FLAG("es", es, 0),
+    OPT_CHOICE("es", es, 0, ({"no", -1}, {"auto", 0}, {"yes", 1})),
     OPT_INTPAIR("check-pattern", opt_pattern, 0),
     OPT_INTRANGE("vsync-fences", opt_vsync_fences, 0, 0, NUM_VSYNC_FENCES),
 
@@ -504,6 +505,7 @@ const struct vo_driver video_out_opengl_hq = {
     .priv_size = sizeof(struct gl_priv),
     .priv_defaults = &(const struct gl_priv){
         .renderer_opts = (struct gl_video_opts *)&gl_video_opts_hq_def,
+        .es = -1,
     },
     .options = options,
 };

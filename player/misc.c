@@ -21,7 +21,7 @@
 #include <assert.h>
 
 #include "config.h"
-#include "talloc.h"
+#include "mpv_talloc.h"
 
 #include "osdep/io.h"
 #include "osdep/timer.h"
@@ -56,21 +56,20 @@ double get_relative_time(struct MPContext *mpctx)
 double rel_time_to_abs(struct MPContext *mpctx, struct m_rel_time t)
 {
     double length = get_time_length(mpctx);
-    double start = get_start_time(mpctx);
     switch (t.type) {
     case REL_TIME_ABSOLUTE:
         return t.pos;
     case REL_TIME_RELATIVE:
         if (t.pos >= 0) {
-            return start + t.pos;
+            return t.pos;
         } else {
             if (length >= 0)
-                return MPMAX(start + length + t.pos, 0.0);
+                return MPMAX(length + t.pos, 0.0);
         }
         break;
     case REL_TIME_PERCENT:
         if (length >= 0)
-            return start + length * (t.pos / 100.0);
+            return length * (t.pos / 100.0);
         break;
     case REL_TIME_CHAPTER:
         if (chapter_start_time(mpctx, t.pos) != MP_NOPTS_VALUE)
@@ -87,12 +86,11 @@ double get_play_end_pts(struct MPContext *mpctx)
     if (opts->play_end.type) {
         end = rel_time_to_abs(mpctx, opts->play_end);
     } else if (opts->play_length.type) {
-        double startpts = get_start_time(mpctx);
         double start = rel_time_to_abs(mpctx, opts->play_start);
         if (start == MP_NOPTS_VALUE)
-            start = startpts;
+            start = 0;
         double length = rel_time_to_abs(mpctx, opts->play_length);
-        if (start != MP_NOPTS_VALUE && length != MP_NOPTS_VALUE)
+        if (length != MP_NOPTS_VALUE)
             end = start + length;
     }
     if (opts->chapterrange[1] > 0) {
@@ -101,35 +99,6 @@ double get_play_end_pts(struct MPContext *mpctx)
             end = cend;
     }
     return end;
-}
-
-// Time used to seek external tracks to.
-double get_main_demux_pts(struct MPContext *mpctx)
-{
-    double main_new_pos = MP_NOPTS_VALUE;
-    if (mpctx->demuxer) {
-        for (int n = 0; n < mpctx->demuxer->num_streams; n++) {
-            struct sh_stream *stream = mpctx->demuxer->streams[n];
-            if (main_new_pos == MP_NOPTS_VALUE && stream->type != STREAM_SUB)
-                main_new_pos = demux_get_next_pts(stream);
-        }
-    }
-    return main_new_pos;
-}
-
-double get_start_time(struct MPContext *mpctx)
-{
-    return mpctx->demuxer ? mpctx->demuxer->start_time : 0;
-}
-
-// Get the offset from the given track to the video.
-double get_track_video_offset(struct MPContext *mpctx, struct track *track)
-{
-    if (track && track->under_timeline)
-        return mpctx->video_offset;
-    if (track && track->is_external)
-        return get_start_time(mpctx);
-    return 0;
 }
 
 float mp_get_cache_percent(struct MPContext *mpctx)
@@ -151,6 +120,28 @@ bool mp_get_cache_idle(struct MPContext *mpctx)
     if (mpctx->demuxer)
         demux_stream_control(mpctx->demuxer, STREAM_CTRL_GET_CACHE_IDLE, &idle);
     return idle;
+}
+
+void update_vo_playback_state(struct MPContext *mpctx)
+{
+    if (mpctx->video_out) {
+        struct voctrl_playback_state oldstate = mpctx->vo_playback_state;
+        struct voctrl_playback_state newstate = {
+            .playing = mpctx->playing,
+            .paused = mpctx->paused,
+            .percent_pos = get_percent_pos(mpctx),
+        };
+
+        if (oldstate.playing != newstate.playing ||
+            oldstate.paused != newstate.paused ||
+            oldstate.percent_pos != newstate.percent_pos) {
+            vo_control(mpctx->video_out,
+                       VOCTRL_UPDATE_PLAYBACK_STATE, &newstate);
+            mpctx->vo_playback_state = newstate;
+        }
+    } else {
+        mpctx->vo_playback_state = (struct voctrl_playback_state){ 0 };
+    }
 }
 
 void update_window_title(struct MPContext *mpctx, bool force)
@@ -259,6 +250,7 @@ struct mpv_global *create_sub_global(struct MPContext *mpctx)
     *new = (struct mpv_global){
         .log = mpctx->global->log,
         .opts = new_config->optstruct,
+        .client_api = mpctx->clients,
     };
     return new;
 }

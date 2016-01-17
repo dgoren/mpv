@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <math.h>
 #include <assert.h>
 
 #include <libavutil/mem.h>
@@ -87,7 +88,7 @@ struct mp_decoder_list *audio_decoder_list(void)
 static struct mp_decoder_list *audio_select_decoders(struct dec_audio *d_audio)
 {
     struct MPOpts *opts = d_audio->opts;
-    const char *codec = d_audio->header->codec;
+    const char *codec = d_audio->header->codec->codec;
 
     struct mp_decoder_list *list = audio_decoder_list();
     struct mp_decoder_list *new =
@@ -145,7 +146,7 @@ int audio_init_best_codec(struct dec_audio *d_audio)
         MP_VERBOSE(d_audio, "Selected audio codec: %s\n", d_audio->decoder_desc);
     } else {
         MP_ERR(d_audio, "Failed to initialize an audio decoder for codec '%s'.\n",
-               d_audio->header->codec ? d_audio->header->codec : "<unknown>");
+               d_audio->header->codec->codec);
     }
 
     talloc_free(list);
@@ -170,14 +171,38 @@ static int decode_new_frame(struct dec_audio *da)
         if (ret < 0)
             return ret;
 
-        if (da->pts == MP_NOPTS_VALUE && da->header->missing_timestamps)
-            da->pts = 0;
-
         if (da->waiting) {
+            if (da->waiting->pts != MP_NOPTS_VALUE) {
+                if (da->pts != MP_NOPTS_VALUE) {
+                    da->pts += da->pts_offset / (double)da->waiting->rate;
+                    da->pts_offset = 0;
+                }
+                double newpts = da->waiting->pts;
+                // Keep the interpolated timestamp if it doesn't deviate more
+                // than 1 ms from the real one. (MKV rounded timestamps.)
+                if (da->pts == MP_NOPTS_VALUE || da->pts_offset != 0 ||
+                    fabs(da->pts - newpts) > 0.001)
+                {
+                    // Attempt to detect jumps in PTS. Even for the lowest
+                    // sample rates and with worst container rounded timestamp,
+                    // this should be a margin more than enough.
+                    if (da->pts != MP_NOPTS_VALUE && fabs(newpts - da->pts) > 0.1)
+                    {
+                        MP_WARN(da, "Invalid audio PTS: %f -> %f\n",
+                                da->pts, newpts);
+                        da->pts_reset = true;
+                    }
+                    da->pts = da->waiting->pts;
+                    da->pts_offset = 0;
+                }
+            }
             da->pts_offset += da->waiting->samples;
             da->decode_format = *da->waiting;
             mp_audio_set_null_data(&da->decode_format);
         }
+
+        if (da->pts == MP_NOPTS_VALUE && da->header->missing_timestamps)
+            da->pts = 0;
     }
     return mp_audio_config_valid(da->waiting) ? AD_OK : AD_ERR;
 }
@@ -259,6 +284,7 @@ void audio_reset_decoding(struct dec_audio *d_audio)
     af_seek_reset(d_audio->afilter);
     d_audio->pts = MP_NOPTS_VALUE;
     d_audio->pts_offset = 0;
+    d_audio->pts_reset = false;
     if (d_audio->waiting) {
         talloc_free(d_audio->waiting);
         d_audio->waiting = NULL;
